@@ -94,7 +94,7 @@ class Attention(keras.layers.Layer):
     output shape: shape
         [batch_size, n_patches + 1, embed_size]
     '''
-    def __init__(self, embed_size, n_heads):
+    def __init__(self, embed_size, n_heads, dropout_rate):
         super(Attention, self).__init__()
         
         self.n_heads = n_heads
@@ -111,8 +111,10 @@ class Attention(keras.layers.Layer):
             self.head_dim
         )
         self.softmax = keras.layers.Softmax()
+        self.drop1 = keras.layers.Dropout(dropout_rate)
         
         self.proj = keras.layers.Dense(embed_size)
+        self.drop2 = keras.layers.Dropout(dropout_rate)
         
     def call(self, inputs):
         
@@ -120,7 +122,7 @@ class Attention(keras.layers.Layer):
         k_t = tf.transpose(k, perm=[0, 2, 1]) # Transpose --> [batch_size, head_dim, n_patches + 1]
         
         attn_filter = (q @ k_t) * self.scale
-        attn_filter = self.softmax(attn_filter)
+        attn_filter = self.drop1(self.softmax(attn_filter))
         
         attn_head = attn_filter @ v
         attn_head = tf.expand_dims(attn_head, axis = 0) # [1, batch_size, n_patches + 1, head_dim]
@@ -131,7 +133,7 @@ class Attention(keras.layers.Layer):
         bs, n_p, hd, nh= [keras.backend.shape(heads)[k] for k in range(4)]
         heads = tf.reshape(heads, [bs, n_p, hd * nh]) # [batch_size, n_patches + 1, embed_dim]
         
-        return self.proj(heads)
+        return self.drop2(self.proj(heads))
 
 class MLP(keras.layers.Layer):
     '''
@@ -165,23 +167,26 @@ class MLP(keras.layers.Layer):
     output shape: shape
         [batch_size, n_patches + 1, embed_size]
     '''
-    def __init__(self, embed_size, hidden_size, activation_fn = 'gelu'):
+    def __init__(self, embed_size, hidden_size, activation_fn = 'gelu', dropout_rate = 0.2):
         super(MLP, self).__init__()
         
         self.Hidden = keras.layers.Dense(
             hidden_size
         )
+        self.drop1 = keras.layers.Dropout(dropout_rate)
         self.activation = keras.activations.get(activation_fn)
+        
         self.Linear = keras.layers.Dense(
             embed_size
         )
+        self.drop2 = keras.layers.Dropout(dropout_rate)
     def call(self, inputs):
         
         x = inputs
         x = self.Hidden(x)
-        x = self.activation(x)
+        x = self.drop1(self.activation(x))
         
-        return self.Linear(x)
+        return self.drop2(self.Linear(x))
 
 class TransformerEncoder(keras.layers.Layer):
     '''
@@ -221,12 +226,12 @@ class TransformerEncoder(keras.layers.Layer):
     output shape: shape
         [batch_size, n_patches + 1, embed_size]
     '''
-    def __init__(self, embed_size, n_heads, mlpHidden_size, mlp_activation):
+    def __init__(self, embed_size, n_heads, mlpHidden_size, mlp_activation, mlp_dropout, attn_dropout):
         super(TransformerEncoder, self).__init__()
         
         self.norm1 = keras.layers.LayerNormalization()
-        self.MSA = Attention(embed_size, n_heads)
-        self.MLP = MLP(embed_size, mlpHidden_size, mlp_activation)
+        self.MSA = Attention(embed_size, n_heads, attn_dropout)
+        self.MLP = MLP(embed_size, mlpHidden_size, mlp_activation, mlp_dropout)
         self.norm2 = keras.layers.LayerNormalization()
         
     def call(self, inputs):
@@ -297,22 +302,28 @@ class VisionTransformer(keras.Model):
                  n_heads, 
                  mlpHidden_size, 
                  mlp_activation,
+                 mlp_dropout,
+                 attn_dropout,
+                 pos_dropout,
                 n_blocks,
                 n_classes,
                 img_size = 32,
-                batch_size = 32):
+                ):
         super(VisionTransformer, self).__init__()
         
         self.embed_size = embed_size
         self.proj = Projection(embed_size, patch_size, img_size)
         self.cls_token = tf.Variable(tf.zeros(shape = [1, 1, embed_size])) # Will be broadcasted to batch size
         self.pos_embed = tf.Variable(tf.zeros(shape = [1, self.proj.n_patches + 1, embed_size]))
+        self.drop = keras.layers.Dropout(pos_dropout)
         
         self.Encoder_blocks = keras.Sequential([
             TransformerEncoder(embed_size, 
                                n_heads, 
                                mlpHidden_size, 
-                               mlp_activation
+                               mlp_activation,
+                               mlp_dropout,
+                               attn_dropout
         ) for _ in range(n_blocks)
         ])
         
@@ -332,8 +343,9 @@ class VisionTransformer(keras.Model):
         
         assert cls_token.shape[0] == linear_embed.shape[0]
         linear_proj = tf.concat([cls_token, linear_embed], axis = 1) # shape --> [batch_size, n_patches + 1, embed_size]
+        linear_proj = linear_proj + self.pos_embed
         
-        x = self.Encoder_blocks(linear_proj + self.pos_embed)
+        x = self.Encoder_blocks(self.drop(linear_proj))
         x = self.norm(x)
         
         cls_token_final = x[:, 0] # Only the output of the cls token should be considered
@@ -353,6 +365,9 @@ if __name__ == "__main__":
                      n_heads = 6, 
                      mlpHidden_size = 1024, 
                      mlp_activation = 'gelu',
+                     mlp_dropout = 0.2,
+                     attn_dropout = 0.1,
+                     pos_dropout = 0.1,
                     n_blocks = 3,
                     n_classes = 10)
     
